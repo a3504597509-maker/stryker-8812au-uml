@@ -92,6 +92,11 @@ jobs:
         run: |
           set -o pipefail
           cd driver
+          # Linux 7.2 dropped EXTRA_CFLAGS from scripts/Makefile.lib; the driver
+          # still puts every -I and -DCONFIG_RTL8812A there, so without this the
+          # compile dies on drv_types.h and then builds empty stubs.
+          sed -i 's/\bEXTRA_CFLAGS\b/ccflags-y/g; s/\bEXTRA_LDFLAGS\b/ldflags-y/g' Makefile
+          echo "ccflags-y lines: $(grep -c 'ccflags-y' Makefile)"
           make ARCH=um SUBARCH=arm64 KSRC="$GITHUB_WORKSPACE/kernel" \
             -j"$(nproc)" 2>&1 | tee build.log
           ls -la ./*.ko
