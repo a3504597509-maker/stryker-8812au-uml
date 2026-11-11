@@ -83,9 +83,14 @@ jobs:
           printf '%s\n' \
             '#ifndef RTW_COMPAT_7X_H' \
             '#define RTW_COMPAT_7X_H' \
-            '#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0))' \
-            '#define from_timer(var, cb, fld) timer_container_of(var, cb, fld)' \
+            '#include <linux/version.h>' \
+            '#ifndef from_timer' \
+            '#define from_timer(var, callback_timer, timer_fieldname) timer_container_of(callback_timer, var, timer_fieldname)' \
+            '#endif' \
+            '#ifndef del_timer_sync' \
             '#define del_timer_sync(t) timer_delete_sync(t)' \
+            '#endif' \
+            '#ifndef del_timer' \
             '#define del_timer(t) timer_delete(t)' \
             '#endif' \
             '#endif' > include/rtw_compat_7x.h
