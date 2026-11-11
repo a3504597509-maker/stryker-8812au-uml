@@ -87,6 +87,10 @@ jobs:
           # so drop it instead of rewriting the PPPoE parsing.
           sed -i 's/^CONFIG_BR_EXT = y/CONFIG_BR_EXT = n/' Makefile
           echo "CONFIG_BR_EXT = $(grep -m1 '^CONFIG_BR_EXT' Makefile)"
+          # 7.2 deleted strncpy/strlcpy; only strscpy remains.
+          grep -rl --include='*.c' --include='*.h' -e strncpy -e strlcpy . | \
+            xargs -r sed -i 's/\bstrncpy\b/strscpy/g; s/\bstrlcpy\b/strscpy/g'
+          echo "strscpy usages: $(grep -rc 'strscpy' --include='*.c' . | awk -F: '{s+=$2} END {print s}')"
           printf '%s\n' \
             '#ifndef RTW_COMPAT_7X_H' \
             '#define RTW_COMPAT_7X_H' \
