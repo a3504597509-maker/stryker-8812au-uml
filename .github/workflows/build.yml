@@ -4,22 +4,25 @@ on:
   workflow_dispatch:
     inputs:
       kernel_commit:
-        description: "linux-um-arm64 commit (must match the running Image)"
+        description: "linux-um-arm64 commit (must match the running libuml.so)"
         required: true
-        default: "8897487c52233cd00cf2850008ca068892f1ae91"
+        default: "32e5e10b81d8882bdaf77b71e4106a941840c750"
       driver_ref:
         description: "aircrack-ng/rtl8812au branch or tag"
         required: true
         default: "v5.6.4.2"
       localversion:
-        description: "localversion to inject into vermagic"
+        description: "localversion injected into vermagic"
         required: true
-        default: "-g8897487c5223"
+        default: "-g32e5e10b81d8"
+      full_kernel:
+        description: "1 = build whole kernel (slow), 0 = modules_prepare only"
+        required: true
+        default: "0"
 
 jobs:
   build:
-    # arm64 native runner: the UML kernel is an aarch64 userspace binary,
-    # cross-compiling it from x86_64 is where most of the pain lives.
+    # Native arm64: the UML kernel is an aarch64 userspace binary.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 240
 
@@ -34,14 +37,20 @@ jobs:
             libssl-dev git curl xz-utils kmod zip
           uname -m
           gcc --version | head -1
-          make --version | head -1
 
       - name: Fetch kernel source
         run: |
           set -euo pipefail
-          git clone --filter=blob:none https://github.com/zalexdev/linux-um-arm64.git kernel
+          git clone --depth=1 -b um-arm64 \
+            https://github.com/zalexdev/linux-um-arm64.git kernel
           cd kernel
-          git checkout "${{ inputs.kernel_commit }}"
+          HEAD_SHA=$(git rev-parse HEAD)
+          echo "branch head: $HEAD_SHA"
+          if [ "$HEAD_SHA" != "${{ inputs.kernel_commit }}" ]; then
+            echo "head moved, fetching pinned commit"
+            git fetch --depth=1 origin "${{ inputs.kernel_commit }}"
+            git checkout FETCH_HEAD
+          fi
           git log -1 --format='HEAD %H%n%s'
 
       - name: Configure
@@ -49,22 +58,27 @@ jobs:
           set -euo pipefail
           cd kernel
           cp "$GITHUB_WORKSPACE/uml.config" .config
-          # Pin the localversion so UTS_RELEASE becomes
-          # 7.2.0-rc4-g8897487c5223 instead of a git-describe of this clone.
           ./scripts/config --set-str LOCALVERSION "${{ inputs.localversion }}"
           ./scripts/config --disable LOCALVERSION_AUTO
+          ./scripts/config --disable MODVERSIONS
+          ./scripts/config --disable MODULE_SIG
+          ./scripts/config --disable TRIM_UNUSED_KSYMS
           make ARCH=um SUBARCH=arm64 olddefconfig
-          grep -E '^CONFIG_(CFG80211|MAC80211|USBIP_VHCI_HCD|MODVERSIONS|MODULE_SIG|LOCALVERSION)=' .config
+          grep -E '^CONFIG_(UML|CFG80211|MAC80211|USBIP_VHCI_HCD|MODVERSIONS|MODULE_SIG|LOCALVERSION)=' .config
           make ARCH=um SUBARCH=arm64 kernelrelease
 
-      - name: Build kernel (produces Module.symvers)
+      - name: Prepare tree
         run: |
           set -euo pipefail
           cd kernel
-          make ARCH=um SUBARCH=arm64 -j"$(nproc)"
-          test -s Module.symvers
-          echo "Module.symvers: $(wc -l < Module.symvers) symbols"
-          grep -cE ' (cfg80211_register_wdev|wiphy_new_nm|usb_register_driver)$' Module.symvers || true
+          if [ "${{ inputs.full_kernel }}" = "1" ]; then
+            make ARCH=um SUBARCH=arm64 -j"$(nproc)"
+            test -s Module.symvers
+            echo "Module.symvers: $(wc -l < Module.symvers)"
+          else
+            make ARCH=um SUBARCH=arm64 modules_prepare
+            echo "modules_prepare done (MODVERSIONS off, Module.symvers not required)"
+          fi
 
       - name: Fetch driver
         run: |
@@ -78,7 +92,8 @@ jobs:
         run: |
           set -o pipefail
           cd driver
-          make ARCH=um SUBARCH=arm64 KSRC="$GITHUB_WORKSPACE/kernel" -j"$(nproc)" 2>&1 | tee build.log
+          make ARCH=um SUBARCH=arm64 KSRC="$GITHUB_WORKSPACE/kernel" \
+            -j"$(nproc)" 2>&1 | tee build.log
           ls -la ./*.ko
 
       - name: Verify module
@@ -88,10 +103,10 @@ jobs:
           KO=$(ls ./*.ko | head -1)
           echo "=== modinfo $KO ==="
           modinfo "$KO" | head -30
-          echo "=== expected vermagic ==="
+          echo "=== expected vermagic prefix ==="
           echo "7.2.0-rc4${{ inputs.localversion }}"
-          echo "=== undefined symbols not in Module.symvers ==="
-          modprobe --version >/dev/null 2>&1 || true
+          echo "=== symbol deps ==="
+          modinfo -F depends "$KO" || true
           mkdir -p "$GITHUB_WORKSPACE/out"
           cp "$KO" "$GITHUB_WORKSPACE/out/"
 
