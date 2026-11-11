@@ -95,6 +95,12 @@ jobs:
           grep -rl --include='*.c' --include='*.h' '#define strscpy strscpy' . | \
             xargs -r sed -i '/^#define strscpy strscpy$/d'
           echo "strscpy usages: $(grep -rc 'strscpy' --include='*.c' . | awk -F: '{s+=$2} END {print s}')"
+          # 7.x changed cfg80211_ops callbacks from struct net_device * to
+          # struct wireless_dev *. Those are the station/AP paths; monitor and
+          # injection use add/change_virtual_intf, whose signature is unchanged.
+          # The driver ships this flag commented out on purpose.
+          sed -i 's/^#ccflags-y += -Wno-error=incompatible-pointer-types/ccflags-y += -Wno-error=incompatible-pointer-types/' Makefile
+          grep -n 'incompatible-pointer-types' Makefile | head
           printf '%s\n' \
             '#ifndef RTW_COMPAT_7X_H' \
             '#define RTW_COMPAT_7X_H' \
