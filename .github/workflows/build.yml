@@ -1,12 +1,12 @@
-name: build-8812au-uml
+name: build-8812au-qemu
 
 on:
   workflow_dispatch:
     inputs:
       kernel_commit:
-        description: "linux-um-arm64 commit (must match the running libuml.so)"
+        description: "linux-um-arm64 commit used to build the QEMU Image"
         required: true
-        default: "32e5e10b81d8882bdaf77b71e4106a941840c750"
+        default: "8897487c52233cd00cf2850008ca068892f1ae91"
       driver_ref:
         description: "aircrack-ng/rtl8812au branch or tag"
         required: true
@@ -14,17 +14,17 @@ on:
       localversion:
         description: "localversion injected into vermagic"
         required: true
-        default: "-g32e5e10b81d8"
+        default: "-g8897487c5223"
       full_kernel:
-        description: "1 = build whole kernel (slow), 0 = modules_prepare only"
+        description: "1 = build whole kernel (needed for Module.symvers), 0 = modules_prepare only"
         required: true
-        default: "0"
+        default: "1"
 
 jobs:
   build:
-    # Native arm64: the UML kernel is an aarch64 userspace binary.
+    # The QEMU guest kernel is a plain arm64 Image, so build natively on arm64.
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 240
+    timeout-minutes: 300
 
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +47,6 @@ jobs:
           HEAD_SHA=$(git rev-parse HEAD)
           echo "branch head: $HEAD_SHA"
           if [ "$HEAD_SHA" != "${{ inputs.kernel_commit }}" ]; then
-            echo "head moved, fetching pinned commit"
             git fetch --depth=1 origin "${{ inputs.kernel_commit }}"
             git checkout FETCH_HEAD
           fi
@@ -57,27 +56,25 @@ jobs:
         run: |
           set -euo pipefail
           cd kernel
-          cp "$GITHUB_WORKSPACE/uml.config" .config
+          cp "$GITHUB_WORKSPACE/kernel.config" .config
           ./scripts/config --set-str LOCALVERSION "${{ inputs.localversion }}"
           ./scripts/config --disable LOCALVERSION_AUTO
-          ./scripts/config --disable MODVERSIONS
-          ./scripts/config --disable MODULE_SIG
-          ./scripts/config --disable TRIM_UNUSED_KSYMS
-          make ARCH=um SUBARCH=arm64 olddefconfig
-          grep -E '^CONFIG_(UML|CFG80211|MAC80211|USBIP_VHCI_HCD|MODVERSIONS|MODULE_SIG|LOCALVERSION)=' .config
-          make ARCH=um SUBARCH=arm64 kernelrelease
+          make ARCH=arm64 olddefconfig
+          grep -E '^CONFIG_(USB|CFG80211|MAC80211|USBIP_VHCI_HCD|MODVERSIONS|MODULE_SIG|TRIM_UNUSED_KSYMS|LOCALVERSION)=' .config || true
+          make ARCH=arm64 kernelrelease
 
-      - name: Prepare tree
+      - name: Prepare kernel tree
         run: |
           set -euo pipefail
           cd kernel
           if [ "${{ inputs.full_kernel }}" = "1" ]; then
-            make ARCH=um SUBARCH=arm64 -j"$(nproc)"
+            make ARCH=arm64 -j"$(nproc)"
             test -s Module.symvers
-            echo "Module.symvers: $(wc -l < Module.symvers)"
+            echo "Module.symvers: $(wc -l < Module.symvers) symbols"
+            grep -E ' (usb_register_driver|wiphy_new_nm|cfg80211_register_wdev)$' Module.symvers | head -5
           else
-            make ARCH=um SUBARCH=arm64 modules_prepare
-            echo "modules_prepare done (MODVERSIONS off, Module.symvers not required)"
+            make ARCH=arm64 modules_prepare
+            echo "modules_prepare only — no Module.symvers, CRCs will not match"
           fi
 
       - name: Fetch driver
@@ -88,16 +85,44 @@ jobs:
           cd driver
           git log -1 --format='driver %H %s'
 
+      - name: Patch driver for 7.2
+        run: |
+          set -euo pipefail
+          cd driver
+          # 7.2 removed EXTRA_CFLAGS from scripts/Makefile.lib; every -I and
+          # -DCONFIG_RTL8812A lives there in this driver.
+          sed -i 's/\bEXTRA_CFLAGS\b/ccflags-y/g; s/\bEXTRA_LDFLAGS\b/ldflags-y/g' Makefile
+          echo "ccflags-y lines: $(grep -c 'ccflags-y' Makefile)"
+
+          # 6.15 removed the old timer helper names; 7.2 has none of them.
+          python3 - <<'PY'
+          p = "include/osdep_service_linux.h"
+          s = open(p, encoding="utf-8", errors="surrogateescape").read()
+          anchor = "#ifndef __OSDEP_SERVICE_LINUX_H_"
+          compat = """
+/* 6.15 renamed the timer helpers; keep the old spellings working. */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0))
+#ifndef from_timer
+#define from_timer(var, callback_timer, timer_fieldname) \\
+	timer_container_of(var, callback_timer, timer_fieldname)
+#endif
+#define del_timer_sync(t) timer_delete_sync(t)
+#define del_timer(t) timer_delete(t)
+#endif
+"""
+          i = s.find(anchor)
+          if i < 0:
+              raise SystemExit("anchor not found")
+          s = s[:i] + compat + s[i:]
+          open(p, "w", encoding="utf-8", errors="surrogateescape").write(s)
+          print("timer compat inserted")
+          PY
+
       - name: Build module
         run: |
           set -o pipefail
           cd driver
-          # Linux 7.2 dropped EXTRA_CFLAGS from scripts/Makefile.lib; the driver
-          # still puts every -I and -DCONFIG_RTL8812A there, so without this the
-          # compile dies on drv_types.h and then builds empty stubs.
-          sed -i 's/\bEXTRA_CFLAGS\b/ccflags-y/g; s/\bEXTRA_LDFLAGS\b/ldflags-y/g' Makefile
-          echo "ccflags-y lines: $(grep -c 'ccflags-y' Makefile)"
-          make ARCH=um SUBARCH=arm64 KSRC="$GITHUB_WORKSPACE/kernel" \
+          make ARCH=arm64 KSRC="$GITHUB_WORKSPACE/kernel" \
             -j"$(nproc)" 2>&1 | tee build.log
           ls -la ./*.ko
 
@@ -108,10 +133,8 @@ jobs:
           KO=$(ls ./*.ko | head -1)
           echo "=== modinfo $KO ==="
           modinfo "$KO" | head -30
-          echo "=== expected vermagic prefix ==="
-          echo "7.2.0-rc4${{ inputs.localversion }}"
-          echo "=== symbol deps ==="
-          modinfo -F depends "$KO" || true
+          echo "=== expected vermagic ==="
+          echo "7.2.0-rc4${{ inputs.localversion }} SMP preempt mod_unload modversions aarch64"
           mkdir -p "$GITHUB_WORKSPACE/out"
           cp "$KO" "$GITHUB_WORKSPACE/out/"
 
@@ -119,14 +142,14 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE/out"
-          tar czf "$GITHUB_WORKSPACE/8812au-uml-aarch64.tar.gz" .
-          sha256sum "$GITHUB_WORKSPACE/8812au-uml-aarch64.tar.gz"
+          tar czf "$GITHUB_WORKSPACE/8812au-qemu-aarch64.tar.gz" .
+          sha256sum "$GITHUB_WORKSPACE/8812au-qemu-aarch64.tar.gz"
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: 8812au-uml-aarch64
+          name: 8812au-qemu-aarch64
           path: |
-            ${{ github.workspace }}/8812au-uml-aarch64.tar.gz
+            ${{ github.workspace }}/8812au-qemu-aarch64.tar.gz
             ${{ github.workspace }}/driver/build.log
           retention-days: 30
