@@ -47,20 +47,24 @@ jobs:
           ./scripts/config --disable LOCALVERSION_AUTO
           make ARCH=um SUBARCH=arm64 olddefconfig
           grep -E '^CONFIG_(UML|64BIT|CFG80211|MAC80211|USBIP_VHCI_HCD|MODVERSIONS|MODULE_SIG|TRIM_UNUSED_KSYMS|LOCALVERSION)=' .config || true
-          make ARCH=um SUBARCH=arm64 kernelrelease
 
       - name: Prepare kernel tree
         run: |
           set -euo pipefail
           cd kernel
-          make ARCH=um SUBARCH=arm64 modules_prepare
-          # scripts/setlocalversion appends "+" whenever git status is dirty,
-          # and every generated file makes it dirty. Commit them so the
-          # vermagic becomes exactly 7.2.0-rc4-g32e5e10b81d8 like the device.
+          # Commit the generated tree FIRST: setlocalversion appends "+" while
+          # git status is dirty, and that "+" ends up inside kernel.release and
+          # therefore inside every module's vermagic.
           git add -A
           git -c user.email=ci@local -c user.name=ci commit -m "prepared tree" --no-verify || true
-          echo "dirty entries after commit: $(git status --porcelain | wc -l)"
-          echo "UTS_RELEASE: $(cat include/config/kernel.release 2>/dev/null || echo unknown)"
+          echo "dirty before release: $(git status --porcelain | wc -l)"
+          rm -f include/config/kernel.release include/generated/utsrelease.h
+          make ARCH=um SUBARCH=arm64 kernelrelease
+          echo "UTS_RELEASE: $(cat include/config/kernel.release)"
+          make ARCH=um SUBARCH=arm64 modules_prepare
+          git add -A
+          git -c user.email=ci@local -c user.name=ci commit -m "modules_prepare" --no-verify || true
+          echo "dirty after: $(git status --porcelain | wc -l)"
 
       - name: Fetch driver
         run: |
