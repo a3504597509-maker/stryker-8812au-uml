@@ -46,7 +46,6 @@ jobs:
           ./scripts/config --set-str LOCALVERSION "-g32e5e10b81d8"
           ./scripts/config --disable LOCALVERSION_AUTO
           make ARCH=um SUBARCH=arm64 olddefconfig
-          touch .scmversion
           grep -E '^CONFIG_(UML|64BIT|CFG80211|MAC80211|USBIP_VHCI_HCD|MODVERSIONS|MODULE_SIG|TRIM_UNUSED_KSYMS|LOCALVERSION)=' .config || true
           make ARCH=um SUBARCH=arm64 kernelrelease
 
@@ -55,7 +54,13 @@ jobs:
           set -euo pipefail
           cd kernel
           make ARCH=um SUBARCH=arm64 modules_prepare
-          echo "modules_prepare done; CONFIG_MODVERSIONS is off, so no CRC matching"
+          # scripts/setlocalversion appends "+" whenever git status is dirty,
+          # and every generated file makes it dirty. Commit them so the
+          # vermagic becomes exactly 7.2.0-rc4-g32e5e10b81d8 like the device.
+          git add -A
+          git -c user.email=ci@local -c user.name=ci commit -m "prepared tree" --no-verify || true
+          echo "dirty entries after commit: $(git status --porcelain | wc -l)"
+          echo "UTS_RELEASE: $(cat include/config/kernel.release 2>/dev/null || echo unknown)"
 
       - name: Fetch driver
         run: |
