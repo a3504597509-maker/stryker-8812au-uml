@@ -1,0 +1,112 @@
+name: build-8812au-uml
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_commit:
+        description: "linux-um-arm64 commit (must match the running Image)"
+        required: true
+        default: "8897487c52233cd00cf2850008ca068892f1ae91"
+      driver_ref:
+        description: "aircrack-ng/rtl8812au branch or tag"
+        required: true
+        default: "v5.6.4.2"
+      localversion:
+        description: "localversion to inject into vermagic"
+        required: true
+        default: "-g8897487c5223"
+
+jobs:
+  build:
+    # arm64 native runner: the UML kernel is an aarch64 userspace binary,
+    # cross-compiling it from x86_64 is where most of the pain lives.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential bc flex bison libelf-dev \
+            libssl-dev git curl xz-utils kmod zip
+          uname -m
+          gcc --version | head -1
+          make --version | head -1
+
+      - name: Fetch kernel source
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none https://github.com/zalexdev/linux-um-arm64.git kernel
+          cd kernel
+          git checkout "${{ inputs.kernel_commit }}"
+          git log -1 --format='HEAD %H%n%s'
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cd kernel
+          cp "$GITHUB_WORKSPACE/uml.config" .config
+          # Pin the localversion so UTS_RELEASE becomes
+          # 7.2.0-rc4-g8897487c5223 instead of a git-describe of this clone.
+          ./scripts/config --set-str LOCALVERSION "${{ inputs.localversion }}"
+          ./scripts/config --disable LOCALVERSION_AUTO
+          make ARCH=um SUBARCH=arm64 olddefconfig
+          grep -E '^CONFIG_(CFG80211|MAC80211|USBIP_VHCI_HCD|MODVERSIONS|MODULE_SIG|LOCALVERSION)=' .config
+          make ARCH=um SUBARCH=arm64 kernelrelease
+
+      - name: Build kernel (produces Module.symvers)
+        run: |
+          set -euo pipefail
+          cd kernel
+          make ARCH=um SUBARCH=arm64 -j"$(nproc)"
+          test -s Module.symvers
+          echo "Module.symvers: $(wc -l < Module.symvers) symbols"
+          grep -cE ' (cfg80211_register_wdev|wiphy_new_nm|usb_register_driver)$' Module.symvers || true
+
+      - name: Fetch driver
+        run: |
+          set -euo pipefail
+          git clone --depth=1 -b "${{ inputs.driver_ref }}" \
+            https://github.com/aircrack-ng/rtl8812au.git driver
+          cd driver
+          git log -1 --format='driver %H %s'
+
+      - name: Build module
+        run: |
+          set -o pipefail
+          cd driver
+          make ARCH=um SUBARCH=arm64 KSRC="$GITHUB_WORKSPACE/kernel" -j"$(nproc)" 2>&1 | tee build.log
+          ls -la ./*.ko
+
+      - name: Verify module
+        run: |
+          set -euo pipefail
+          cd driver
+          KO=$(ls ./*.ko | head -1)
+          echo "=== modinfo $KO ==="
+          modinfo "$KO" | head -30
+          echo "=== expected vermagic ==="
+          echo "7.2.0-rc4${{ inputs.localversion }}"
+          echo "=== undefined symbols not in Module.symvers ==="
+          modprobe --version >/dev/null 2>&1 || true
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp "$KO" "$GITHUB_WORKSPACE/out/"
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/out"
+          tar czf "$GITHUB_WORKSPACE/8812au-uml-aarch64.tar.gz" .
+          sha256sum "$GITHUB_WORKSPACE/8812au-uml-aarch64.tar.gz"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: 8812au-uml-aarch64
+          path: |
+            ${{ github.workspace }}/8812au-uml-aarch64.tar.gz
+            ${{ github.workspace }}/driver/build.log
+          retention-days: 30
