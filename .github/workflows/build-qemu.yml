@@ -3,20 +3,12 @@ name: build-8812au-qemu
 on:
   workflow_dispatch:
     inputs:
-      kernel_commit:
-        description: "linux-um-arm64 commit used to build the QEMU Image"
-        required: true
-        default: "8897487c52233cd00cf2850008ca068892f1ae91"
       driver_ref:
         description: "aircrack-ng/rtl8812au branch or tag"
         required: true
         default: "v5.6.4.2"
-      localversion:
-        description: "localversion injected into vermagic"
-        required: true
-        default: "-g8897487c5223"
       full_kernel:
-        description: "1 = build whole kernel (slow), 0 = use symvers.txt dumped from the device"
+        description: "1 = build whole kernel, 0 = use symvers.txt dumped from the device"
         required: true
         default: "0"
 
@@ -43,10 +35,8 @@ jobs:
           git clone --depth=1 -b um-arm64 \
             https://github.com/zalexdev/linux-um-arm64.git kernel
           cd kernel
-          HEAD_SHA=$(git rev-parse HEAD)
-          echo "branch head: $HEAD_SHA"
-          if [ "$HEAD_SHA" != "${{ inputs.kernel_commit }}" ]; then
-            git fetch --depth=1 origin "${{ inputs.kernel_commit }}"
+          if [ "$(git rev-parse HEAD)" != "8897487c52233cd00cf2850008ca068892f1ae91" ]; then
+            git fetch --depth=1 origin 8897487c52233cd00cf2850008ca068892f1ae91
             git checkout FETCH_HEAD
           fi
           git log -1 --format='HEAD %H%n%s'
@@ -56,10 +46,10 @@ jobs:
           set -euo pipefail
           cd kernel
           cp "$GITHUB_WORKSPACE/kernel.config" .config
-          ./scripts/config --set-str LOCALVERSION "${{ inputs.localversion }}"
+          ./scripts/config --set-str LOCALVERSION "-g8897487c5223"
           ./scripts/config --disable LOCALVERSION_AUTO
           make ARCH=arm64 olddefconfig
-          grep -E '^CONFIG_(USB|CFG80211|MAC80211|USBIP_VHCI_HCD|MODVERSIONS|MODULE_SIG|TRIM_UNUSED_KSYMS|LOCALVERSION)=' .config || true
+          grep -E '^CONFIG_(USB=|CFG80211=|MAC80211=|USBIP_VHCI_HCD=|MODVERSIONS=|MODULE_SIG=|LOCALVERSION=)' .config || true
           make ARCH=arm64 kernelrelease
 
       - name: Prepare kernel tree
@@ -68,11 +58,11 @@ jobs:
           cd kernel
           if [ "${{ inputs.full_kernel }}" = "1" ]; then
             make ARCH=arm64 -j"$(nproc)"
-            echo "Module.symvers from full build: $(wc -l < Module.symvers) symbols"
+            echo "Module.symvers from full build: $(wc -l < Module.symvers)"
           else
             make ARCH=arm64 modules_prepare
             cp "$GITHUB_WORKSPACE/symvers.txt" Module.symvers
-            echo "Module.symvers from device dump: $(wc -l < Module.symvers) symbols"
+            echo "Module.symvers from device dump: $(wc -l < Module.symvers)"
           fi
           grep -E ' (wiphy_new_nm|wiphy_register|usb_register_driver)$' Module.symvers | head -5
 
@@ -88,30 +78,20 @@ jobs:
         run: |
           set -euo pipefail
           cd driver
-          sed -i 's/\bEXTRA_CFLAGS\b/ccflags-y/g; s/\bEXTRA_LDFLAGS\b/ldflags-y/g' Makefile
+          sed -i 's/EXTRA_CFLAGS/ccflags-y/g; s/EXTRA_LDFLAGS/ldflags-y/g' Makefile
           echo "ccflags-y lines: $(grep -c 'ccflags-y' Makefile)"
-          python3 - <<'PY'
-          p = "include/osdep_service_linux.h"
-          s = open(p, encoding="utf-8", errors="surrogateescape").read()
-          anchor = "#ifndef __OSDEP_SERVICE_LINUX_H_"
-          compat = """
-/* 6.15 renamed the timer helpers; keep the old spellings working. */
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0))
-#ifndef from_timer
-#define from_timer(var, callback_timer, timer_fieldname) \\
-	timer_container_of(var, callback_timer, timer_fieldname)
-#endif
-#define del_timer_sync(t) timer_delete_sync(t)
-#define del_timer(t) timer_delete(t)
-#endif
-"""
-          i = s.find(anchor)
-          if i < 0:
-              raise SystemExit("anchor not found")
-          s = s[:i] + compat + s[i:]
-          open(p, "w", encoding="utf-8", errors="surrogateescape").write(s)
-          print("timer compat inserted")
-          PY
+          printf '%s\n' \
+            '#ifndef RTW_COMPAT_7X_H' \
+            '#define RTW_COMPAT_7X_H' \
+            '#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 15, 0))' \
+            '#define from_timer(var, cb, fld) timer_container_of(var, cb, fld)' \
+            '#define del_timer_sync(t) timer_delete_sync(t)' \
+            '#define del_timer(t) timer_delete(t)' \
+            '#endif' \
+            '#endif' > include/rtw_compat_7x.h
+          sed -i '1i #include "rtw_compat_7x.h"' include/osdep_service_linux.h
+          head -3 include/osdep_service_linux.h
+          cat include/rtw_compat_7x.h
 
       - name: Build module
         run: |
