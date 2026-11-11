@@ -86,7 +86,7 @@ jobs:
             '#define RTW_COMPAT_7X_H' \
             '#include <linux/version.h>' \
             '#ifndef from_timer' \
-            '#define from_timer(var, callback_timer, timer_fieldname) timer_container_of(callback_timer, var, timer_fieldname)' \
+            '#define from_timer(var, callback_timer, timer_fieldname) timer_container_of(var, callback_timer, timer_fieldname)' \
             '#endif' \
             '#ifndef del_timer_sync' \
             '#define del_timer_sync(t) timer_delete_sync(t)' \
