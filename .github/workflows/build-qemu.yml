@@ -81,6 +81,12 @@ jobs:
           cd driver
           sed -i 's/EXTRA_CFLAGS/ccflags-y/g; s/EXTRA_LDFLAGS/ldflags-y/g' Makefile
           echo "ccflags-y lines: $(grep -c 'ccflags-y' Makefile)"
+          # rtw_br_ext is the NAT25 bridge helper for WISP mode. It pokes
+          # struct pppoe_hdr/pppoe_tag, whose flexible-array members are gone
+          # from the kernel build in 7.x. Monitor + injection never touch it,
+          # so drop it instead of rewriting the PPPoE parsing.
+          sed -i 's/^CONFIG_BR_EXT = y/CONFIG_BR_EXT = n/' Makefile
+          echo "CONFIG_BR_EXT = $(grep -m1 '^CONFIG_BR_EXT' Makefile)"
           printf '%s\n' \
             '#ifndef RTW_COMPAT_7X_H' \
             '#define RTW_COMPAT_7X_H' \
