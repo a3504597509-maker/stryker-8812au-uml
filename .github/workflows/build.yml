@@ -84,6 +84,14 @@ jobs:
           sed -i 's/^CONFIG_BR_EXT = y/CONFIG_BR_EXT = n/' Makefile
           echo "CONFIG_BR_EXT = $(grep -m1 '^CONFIG_BR_EXT' Makefile)"
 
+          # ARCH=um SUBARCH=arm64 pulls arch/arm64/include/asm/string.h, which
+          # defines __HAVE_ARCH_MEMCPY and friends. lib/string.c then compiles
+          # those out, so no EXPORT_SYMBOL exists and an out-of-tree module
+          # dies with "Unknown symbol memcpy (err -2)". Build local copies.
+          cp ../rtw_libc_shim.c os_dep/linux/rtw_libc_shim.c
+          sed -i '/^obj-\$(CONFIG_88XXAU)/i $(MODULE_NAME)-y += os_dep/linux/rtw_libc_shim.o' Makefile
+          echo "shim in objs:"; grep -n 'rtw_libc_shim' Makefile
+
           grep -rl --include='*.c' --include='*.h' -e strncpy -e strlcpy . | \
             xargs -r sed -i 's/\bstrncpy\b/strscpy/g; s/\bstrlcpy\b/strscpy/g'
           grep -rl --include='*.c' --include='*.h' '#define strscpy strscpy' . | \
