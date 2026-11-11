@@ -49,6 +49,7 @@ jobs:
           ./scripts/config --set-str LOCALVERSION "-g8897487c5223"
           ./scripts/config --disable LOCALVERSION_AUTO
           make ARCH=arm64 olddefconfig
+          touch .scmversion
           grep -E '^CONFIG_(USB=|CFG80211=|MAC80211=|USBIP_VHCI_HCD=|MODVERSIONS=|MODULE_SIG=|LOCALVERSION=)' .config || true
           make ARCH=arm64 kernelrelease
 
@@ -64,7 +65,7 @@ jobs:
             cp "$GITHUB_WORKSPACE/symvers.txt" Module.symvers
             echo "Module.symvers from device dump: $(wc -l < Module.symvers)"
           fi
-          grep -E ' (wiphy_new_nm|wiphy_register|usb_register_driver)$' Module.symvers | head -5
+          grep -E 'wiphy_new_nm|wiphy_register|usb_register_driver' Module.symvers | head -5 || true
 
       - name: Fetch driver
         run: |
